@@ -1,6 +1,8 @@
 # coding:utf-8
 
-import xml.parsers.expat, re, codecs, json, os.path
+#import xml.parsers.expat
+from html.parser import HTMLParser
+import re, codecs, glob, json, os.path
 from functools import reduce
 
 class six():
@@ -41,7 +43,6 @@ parse_ids = {}
 G_re_blank = None
 debug = False
 debug_string = None
-ID_name = 'id'
 
 def start_document():
 	global parse_tree, parse_ids
@@ -50,7 +51,7 @@ def start_document():
 	parse_ids = {}
 	
 def end_document():
-	assert stack == [] and curr_elem == None
+	assert stack == [] and curr_elem == None, (stack, curr_elem)
 
 def lastSonHasToBeSkipped():
 	#
@@ -64,7 +65,7 @@ def start_element(name, attrs):
 		curr_elem.pop()
 	push(curr_elem)
 	curr_elem = [name,attrs]
-	aid = attrs.get(ID_name) # if ID_name is not None else None
+	aid = attrs.get('id')
 	if aid != None:
 		if aid not in parse_ids:
 			parse_ids[aid] = (curr_elem, path())
@@ -76,7 +77,7 @@ def end_element(name):
 	global curr_elem, parse_tree, debug
 	if debug:
 		debug = True
-	assert name == curr_elem[0]
+	assert name == curr_elem[0], (name , curr_elem[0])
 	### attention : cela transforme <foo> </foo> en <foo/>  (genant pour <strong> par exemple)
 	if lastSonHasToBeSkipped():
 		curr_elem.pop()
@@ -101,18 +102,91 @@ def char_data(data):
 	#if not (G_re_blank and G_re_blank.match(data)):
 	#	curr_elem.append(data)
 
-def parse(fn, txt_skip="^[ \t\r\n]*$", id_name='id'):
-	global parse_tree, parse_ids, G_re_blank, ID_name
-	ID_name = id_name
+html_dbg = False
+html_void_elements = {'area', 'base', 'br', 'col', 'embed', 'hr', 'img', 'input', 'link', 'meta', 'param', 'source', 'track', 'wbr'}
+## https://html.spec.whatwg.org/#parse-state
+html_stop = {
+	'b':'table',
+	'table': {},
+}
+class MyHTMLParser(HTMLParser):
+	def handle_starttag(self, tag, attrs):
+		if html_dbg: print("Encountered a start tag:", tag)
+		if tag == 'html' and attrs == [] and curr_elem is not None and curr_elem[0] == 'html':
+			print('*** <html> au lieu de </html>')
+			end_element(tag) # bug Mathworks
+		elif tag in html_void_elements: # auto-fermant
+			# https://html.spec.whatwg.org/multipage/syntax.html#void-elements
+			start_element(tag, dict(attrs))
+			end_element(tag)
+		else:
+			start_element(tag, dict(attrs))
+
+	def handle_endtag(self, tag):
+		if html_dbg: print("Encountered an end tag :", tag)
+		if tag in ('body','html'):
+			_ = 2+2
+		if tag in html_void_elements: # auto-fermé
+			return
+		if (tag == 'tr' and curr_elem and curr_elem[0] == 'table') \
+		or (tag in ('a','dd','dl') and curr_elem and curr_elem[0] == 'p') \
+		or (tag in ('b',) and curr_elem and curr_elem[0] == 'td'):
+			print('*** {} </{}>: skip'.format(self.getpos(), tag))
+			return
+		if True: # on ferme tout en force
+			while curr_elem and curr_elem[0] != tag:
+				print('*** {} </{}>: terminaison forcee de <{}>'.format(self.getpos(), tag, curr_elem[0]))
+				end_element(curr_elem[0])
+		if curr_elem and curr_elem[0] == tag:
+			end_element(tag)
+		else:
+			_ = 2+2
+		
+	def handle_startendtag(self, tag, attrs):
+		if html_dbg: print("Encountered a start/end tag:", tag)
+		start_element(tag, dict(attrs))
+		end_element(tag)
+
+	def handle_data(self, data):
+		if html_dbg: print("Encountered some data  :", data)
+		if curr_elem is None:
+			if not( data == '' or data.isspace() ):
+				# '\ufeff' : R2020b\help\dotnetbuilder\MWArrayAPI\index.html, debut
+				# '---\n': R2020b\toolbox\hdlcoder\hdlcoderdemos\html\hdlcoder_multirate_delaybalancing_tutorial.html
+				assert data in ('\ufeff','---\n'), data.encode('utf-8')
+		else:
+			char_data(data)
+
+	# nouvelle methode
+	def ParseFile(self,fd):
+		""
+		for self.li, line in enumerate(fd):
+			if isinstance(line, bytes):
+				try:
+					line = line.decode(encoding='utf-8')
+				except:
+					line = line.decode(encoding='cp1252')
+			self.feed(line)
+		self.close()
+		while curr_elem is not None:
+			print('*** {} EOF: terminaison forcee de <{}>'.format(self.getpos(), curr_elem[0]))
+			end_element(curr_elem[0])
+
+def parse(fn, txt_skip="^[ \t\r\n]*$"):
+	global parse_tree, parse_ids, G_re_blank
+	
 	if txt_skip == None:
 		G_re_blank = None
 	else:
 		G_re_blank = re.compile(txt_skip)
 	
-	p = xml.parsers.expat.ParserCreate()
-	p.StartElementHandler = start_element
-	p.EndElementHandler = end_element
-	p.CharacterDataHandler = char_data
+	if False:
+		p = xml.parsers.expat.ParserCreate()
+		p.StartElementHandler = start_element
+		p.EndElementHandler = end_element
+		p.CharacterDataHandler = char_data
+	else:
+		p = MyHTMLParser()
 	
 	if isinstance(fn,six.string_types):
 		if os.path.exists(fn):
@@ -133,10 +207,10 @@ def parse(fn, txt_skip="^[ \t\r\n]*$", id_name='id'):
 	parse_ids = {}
 	return r
 
-def parseString(s, txt_skip="^[ \t\r\n]*$", id_name='id'):
+def parseString(s, txt_skip="^[ \t\r\n]*$"):
 	#
 	import io
-	return parse(io.BytesIO(bytes(s,encoding='utf-8')), txt_skip, id_name)
+	return parse(io.BytesIO(bytes(s,encoding='utf-8')), txt_skip)
 
 #############################
 
@@ -293,7 +367,7 @@ ligne2
 
 </foo>
 """]
-	for s in sl:
+	for s in sl and []:
 		print('<<<<')
 		print(s)
 		print('>>>>')
@@ -301,4 +375,23 @@ ligne2
 # 		print(ref_js)
 		js = parseString(s)
 		print(js)
+	#parse('F:/MATLAB/GEONYX_SLCI/navt1_8dec2020/summaryReport.html')
+	file_pat = r'C:\Program Files\MATLAB\R2020b\help\**\*.html'
+	file_pat = r'C:\Program Files\MATLAB\R2020b\**\*.html'
+	#file_pat = r'C:\Program Files\MATLAB\R2020b\help\includes\web\html\**\*.htm*'
+	file_pat = r'C:\Program Files\MATLAB\R2020b\derived\toolbox\learning\simulink\learning_content\**\*.html'
+	file_pat = r'C:\Program Files\MATLAB\R2020b\examples\slrequirements\data\autopilot_requirements.html'
+	file_pat = r'C:\Program Files\MATLAB\R2020b\**\*.html'
+	end_excluded = (r'R2020b\help\includes\web\html\bodytrail_cta.html',
+				 r'R2020b\help\includes\web\html\doc_search.html',
+				 r'R2020b\help\includes\web\html\login.html',
+				 r'rtw\targets\common\profile\execution\exec_profile.html',
+				 r'sl3d\vrealm\manual\vrealm_man.html',
+				 r'1519613-20201027194114\cpanel-ui\templates\LanguageCLikePanelSyntaxEditorSampleText.html')
+	#file_pat = r'C:\Program Files\MATLAB\R2020b\help\includes\web\html\bodytrail_cta.html'
+	#file_pat = r'C:\Program Files\MATLAB\R2020b\help\techdoc\matlab_env\examples\upslope\natick_ned_meta1.html'
+	for f in glob.glob(file_pat, recursive=True):
+		if f.endswith(end_excluded): continue
+		print(f)
+		parse(f)
 	
