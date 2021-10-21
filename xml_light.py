@@ -142,9 +142,12 @@ def parseString(s, txt_skip="^[ \t\r\n]*$", id_name='id'):
 
 fn_getitem1 = list.__getitem__
 fn_getitem2 = lambda o, i: o[i]
-def get(tree,path):
+def get(tree,path, default=None):
 	#
-	return reduce(fn_getitem2,path,tree)
+	try:
+		return reduce(fn_getitem2,path,tree)
+	except IndexError:
+		return default
 
 def firstChildIndex(js):
 	"""

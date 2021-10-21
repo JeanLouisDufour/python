@@ -43,7 +43,7 @@ def elt_add(n,v):
 	
 def xsd_gen(x,p):
 	""
-	assert isinstance(x,list)
+	assert isinstance(x,list) # pas d'info en chaine de charactere
 	kind = x[0] # [:4] == 'xsd:'
 	if len(x) >= 2:
 		assert isinstance(x[1],dict)
@@ -104,14 +104,21 @@ def xsd_element(x,p):
 	name = attrs['name']
 	assert ':' not in name
 	elt_add(name,p)
+	minO = attrs.get('minOccurs')
+	maxO = attrs.get('maxOccurs')
 	ty = attrs.get('type')
 	if ty is None:
 		assert len(x) == 3
 		ty_def = x[-1]
 		assert ty_def[0] == 'xsd:complexType' and ty_def[1] == {}
+		assert minO in ('0','1'), attrs
+		assert maxO in ('1','unbounded'), attrs
 	else:
 		assert ':' in ty, ty
 		assert len(x) == 2
+		assert minO in (None,'0','1'), attrs
+		assert maxO in (None,'1'), attrs
+		assert (minO is None) == (maxO is None), attrs
 
 def xsd_group(x,p):
 	""
@@ -134,7 +141,8 @@ def xsd_schema(x,p):
 	
 def xsd_sequence(x,p):
 	""
-	pass
+	assert x[1] == {}, x
+	assert all(y[0] in ('xsd:element',) for y in x[2:]) or [y[0] for y in x[2:]] == ['xsd:any'], x
 
 def xsd_simpleType(x,p):
 	""
@@ -173,12 +181,19 @@ def xsd_chk(x,p):
 xsd = None
 #elt_name = elt_type = None
 
-def XMLSchema(xsd_path):
+def XMLSchema(xsd_path, ty_prefix_l = ("REQIF:","xsd:")):
 	""
-	global xsd, elt_name, elt_type
+	global xsd # , elt_name, elt_type
 	xsd, _ = parse(xsd_path)
 	xml_iter(xsd, xsd_gen)
 	assert all(tv is None or len(tv)==1 for tv in typ_d.values())
+	for en, epl in elt_d.items():
+		for p in epl:
+			elt = get(xsd,p)
+			ty = elt[1].get('type')
+			if ty is not None:
+				assert ty.startswith(ty_prefix_l), ty
+				assert ty[ty.index(':')+1:] in typ_d, ty
 	xml_iter(xsd, xsd_chk)
 # 	assert xsd[0] == "xsd:schema"
 # 	assert xsd[1]['xmlns:xsd'] == "http://www.w3.org/2001/XMLSchema"
@@ -213,7 +228,7 @@ def xml_iter(x, f, p = []):
 	for i,y in enumerate(x[2:], start=2):
 		xml_iter(y,f,p+[i])
 
-def xml_chk(x, p):
+def xml_pass2(x, p):
 	""
 	if isinstance(x,list):
 		k = x[0]
@@ -226,10 +241,154 @@ def xml_chk(x, p):
 				sch = get(xsd, kp)
 				_ = 2+2
 
+##############################
+
+xml_chk_root = None
+
+def td_of_elt(e):
+	""
+	pass
+
+def xml_element(xml,xml_p, e, e_p):
+	""
+	if xml != get(xml_chk_root,xml_p):
+		assert False
+	assert e[0] == 'xsd:element'
+	if e != get(xsd,e_p):
+		assert False
+	if 'type' in e[1]:
+		assert len(e)==2
+		new_cpty_name = e[1]['type']
+		new_cpty_name = new_cpty_name[new_cpty_name.index(':')+1:]
+		xml_complexType(xml, xml_p, new_cpty_name)
+	else:
+		assert len(e)==3
+		new_cpty = e[2]
+		new_cpty_p = e_p+[2]
+		xml_complexType(xml, xml_p, new_cpty, new_cpty_p)
+
+def xml_complexType(xml, xml_p, cpty, cpty_p = None):
+	""
+	if isinstance(cpty,str):
+		assert cpty_p is None
+		if cpty in ('dateTime','string'):
+			assert len(xml)==3 and isinstance(xml[-1],str)
+			return
+		[cpty_p] = typ_d[cpty]
+		cpty = get(xsd,cpty_p)
+		assert cpty is not None
+	else:
+		if cpty != get(xsd,cpty_p):
+			assert False
+	if xml != get(xml_chk_root,xml_p):
+		assert False
+	if cpty[0] == 'xsd:simpleType':
+		assert len(xml)==3 and isinstance(xml[-1],str)
+		return
+	assert cpty[0] == 'xsd:complexType', cpty
+	td = cpty; td_p = cpty_p
+	tattr_req = {d.get('name','xmlns'):d.get('type') for [_,d] in td[3:] if d['use']=='required'}
+	tattr_opt = {d.get('name','xmlns'):d.get('type') for [_,d] in td[3:] if d['use']=='optional'}
+	assert len(tattr_req) + len(tattr_opt) + 3 == len(td), td
+	for n,t in tattr_req.items():
+		if n not in xml[1]:
+			print(xml[0], xml_p, 'required attribute',n)
+	for n,v in xml[1].items():
+		assert n in tattr_req or n in tattr_opt or (xml_p==[] and n.startswith(('xmlns:','xsi:'))), n
+	# body
+	tbody = td[2]; tbody_p = td_p + [2]
+	tbk = tbody[0]
+	if tbk == 'xsd:all': # any order
+		tag_d = {e[1]['name']:(tbody_p+[e_i],e) for e_i,e in enumerate(tbody[2:], start=2)}
+		for x_i,x in enumerate(xml[2:], start=2):
+			assert x[0] in tag_d
+			elt_p, elt = tag_d[x[0]]
+			xml_element(x, xml_p+[x_i], elt, elt_p)
+	elif tbk == 'xsd:choice':
+		min_max = tbody[1].get('minOccurs'), tbody[1].get('maxOccurs')
+		tag_d = {e[1]['name']:(tbody_p+[e_i],e) for e_i,e in enumerate(tbody[2:],start=2)}
+		assert len(tag_d) == len(tbody)-2
+		for x_i,x in enumerate(xml[2:], start=2):
+			assert x[0] in tag_d
+			elt_p, elt = tag_d[x[0]]
+			xml_element(x, xml_p+[x_i], elt, elt_p)
+	elif tbk == 'xsd:sequence':
+		if [y[0] for y in tbody[2:]] == ['xsd:any']:
+			pass # print(xml[0], xml_p, 'sequence/any : rien a verifier')
+		else:
+			assert all(y[0] in ('xsd:element',) for y in tbody[2:])
+			xml_i = 2
+			for e_i,e in enumerate(tbody[2:], start=2):
+				e_p = tbody_p + [e_i]
+				name = e[1]['name']
+				min_max = e[1].get('minOccurs'), e[1].get('maxOccurs')
+				if min_max == ('1','1'):	
+					x = xml[xml_i]; x_p = xml_p+[xml_i]
+					assert x[0] == name
+					xml_element(x, x_p, e, e_p)
+# 					if 'type' in e[1]:
+# 						new_cpty_name = e[1]['type']
+# 						new_cpty_name = new_cpty_name[new_cpty_name.index(':')+1:]
+# 						xml_complexType(x, xml_p+[xml_i], new_cpty_name)
+# 					else:
+# 						assert len(e)==3
+# 						new_cpty = e[2]
+# 						new_cpty_p = cpty_p+[e_i,2]
+# 						xml_complexType(x, xml_p+[xml_i], new_cpty, new_cpty_p)
+					xml_i += 1
+				elif min_max == ('0','1'):
+					if xml_i < len(xml) and xml[xml_i][0] == name:
+						x = xml[xml_i]; x_p = xml_p+[xml_i]
+						xml_element(x, x_p, e, e_p)
+# 						if 'type' in e[1]:
+# 							new_cpty_name = e[1]['type']
+# 							new_cpty_name = new_cpty_name[new_cpty_name.index(':')+1:]
+# 							xml_complexType(x, x_p, new_cpty_name)
+# 						else:
+# 							assert len(e)==3
+# 							new_cpty = e[2]; new_cpty_p = e_p+[2]
+# 							xml_complexType(x, x_p, new_cpty, new_cpty_p)
+						xml_i += 1
+				else:
+					assert False, min_max
+			if xml_i != len(xml):
+				assert False
+	else:
+		assert False, tbk
+
+def xml_chk(xml):
+	"""
+	"""
+	global xml_chk_root
+	xml_chk_root = xml
+	k = xml[0] # REQ-IF
+	assert k == 'REQ-IF'
+	pl =  elt_d[k]
+	assert len(pl) == 1
+	[p] = pl
+	elt = get(xsd,p)
+	assert elt[0] == 'xsd:element'
+	ty = elt[1].get('type')
+	if ty is None:
+		# type 'inline'
+		assert False
+	else:
+		# type nomme
+		[tdp] = typ_d[ty[ty.index(':')+1:]]
+		td = get(xsd, tdp)
+		if td[0] == 'xsd:simpleType':
+			assert False, td # ne sert que pour les attributs ?
+		elif td[0] == 'xsd:complexType':
+			xml_complexType(xml, [], td, tdp)
+		else:
+			assert False, td
+
 if __name__ == "__main__":
 	xml_path = r'C:\Users\F074018\Documents\IMUGS\xml\backbone_pr9.reqif'
 	xsd_path = r'C:\Users\F074018\Documents\IMUGS\xml\dtc-11-04-05.xsd'
 	_ = XMLSchema(xsd_path)
 	xml,_ = parse(xml_path)
-	xml_iter(xml, xml_chk)
+	xml_iter(xml, xml_pass2)
+	#
+	xml_chk(xml)
 	
